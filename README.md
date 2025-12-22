@@ -134,8 +134,9 @@ For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
 
 | File | Description |
 |------|-------------|
-| `last9-otel-collector-values.yaml` | OpenTelemetry Collector configuration for logs and traces |
-| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for metrics |
+| `last9-otel-collector-values.yaml` | OpenTelemetry Collector (DaemonSet) for logs and traces |
+| `last9-otel-collector-metrics-deployment-values.yaml` | OpenTelemetry Collector (Deployment) for application metrics scraping |
+| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for cluster metrics |
 | `last9-kube-events-agent-values.yaml` | Events collection agent configuration |
 | `collector-svc.yaml` | Collector service for application instrumentation |
 | `instrumentation.yaml` | Auto-instrumentation configuration |
@@ -203,26 +204,61 @@ The script automatically sets up instrumentation for:
 
 The OpenTelemetry Collector can automatically discover and scrape application metrics using Kubernetes service discovery with Prometheus-compatible scraping.
 
-**Note:** This is an optional feature. Use `last9-otel-collector-metrics-values.yaml` to enable metrics scraping.
+**Note:** This is an optional feature that uses a **separate Deployment collector** to avoid duplicate metric scraping.
+
+### Architecture: Dual Collector Setup
+
+For optimal metrics collection, we recommend running two separate collectors:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────────────┐   ┌─────────────────────────┐  │
+│  │   DaemonSet Collector   │   │  Deployment Collector   │  │
+│  │   (one per node)        │   │  (single instance)      │  │
+│  ├─────────────────────────┤   ├─────────────────────────┤  │
+│  │ • Logs (filelog)        │   │ • App metrics scraping  │  │
+│  │ • Traces (OTLP)         │   │ • Prometheus SD         │  │
+│  │ • Push-based telemetry  │   │ • No duplicate scrapes  │  │
+│  └───────────┬─────────────┘   └────────────┬────────────┘  │
+│              │                              │               │
+└──────────────┼──────────────────────────────┼───────────────┘
+               │                              │
+               ▼                              ▼
+          Last9 OTLP                 Last9 Prometheus
+          Endpoint                   Remote Write
+```
+
+| Collector | Mode | Purpose | Config File |
+|-----------|------|---------|-------------|
+| Logs & Traces | DaemonSet | Node-local log/trace collection | `last9-otel-collector-values.yaml` |
+| Metrics | Deployment | Centralized metrics scraping | `last9-otel-collector-metrics-deployment-values.yaml` |
+
+**Why separate collectors?**
+- **DaemonSet** is required for logs (reads `/var/log/pods` on each node) and traces (low-latency local endpoint)
+- **Deployment** is better for metrics scraping — a single instance avoids duplicate scrapes that would occur with DaemonSet
 
 ### Enable Metrics Scraping
 
-To enable application metrics scraping, deploy with the additional metrics configuration file:
+**Step 1: Configure Last9 Metrics Endpoint**
 
-```bash
-# Deploy with metrics scraping enabled
-helm upgrade last9-opentelemetry-collector opentelemetry-collector \
-  --namespace last9 \
-  --values last9-otel-collector-values.yaml \
-  --values last9-otel-collector-metrics-values.yaml
-```
-
-**Configure Last9 Metrics Endpoint:**
-
-Before deploying, update these placeholders in `last9-otel-collector-metrics-values.yaml`:
+Before deploying, update these placeholders in `last9-otel-collector-metrics-deployment-values.yaml`:
 - `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 Prometheus remote write URL
 - `{{LAST9_METRICS_USERNAME}}` - Your Last9 metrics username
 - `{{LAST9_METRICS_PASSWORD}}` - Your Last9 metrics password
+
+**Step 2: Deploy the Metrics Collector**
+
+```bash
+# Deploy dedicated metrics collector (Deployment mode)
+helm upgrade --install last9-otel-collector-metrics open-telemetry/opentelemetry-collector \
+  --namespace last9 \
+  --values last9-otel-collector-metrics-deployment-values.yaml
+```
+
+This runs alongside your existing DaemonSet collector without conflict.
 
 ### Quick Start
 
@@ -270,33 +306,48 @@ This setup scales automatically:
 - **1000 services** → Automatically scraped
 - **No configuration changes needed** when adding new services
 
-### Configuration Files
+### Metrics Configuration Files
 
-**Base Configuration:** `last9-otel-collector-values.yaml`
-- Traces and logs collection
-- Basic OTLP receiver
-- No metrics scraping
+| File | Mode | Recommended |
+|------|------|-------------|
+| `last9-otel-collector-metrics-deployment-values.yaml` | Separate Deployment | ✅ Yes |
+| `last9-otel-collector-metrics-values.yaml` | DaemonSet overlay | ⚠️ Alternative |
 
-**Optional Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
-- **Prometheus receiver** with kubernetes_sd_configs for auto-discovery
-- **prometheusremotewrite exporter** for sending to Last9
-- **RBAC** for Kubernetes API access
-- **Increased resource limits** for collector pods
-- **BasicAuth extension** for Last9 metrics endpoint
+**Recommended: Separate Deployment** (`last9-otel-collector-metrics-deployment-values.yaml`)
+- Runs as a single Deployment alongside the DaemonSet
+- No duplicate metric scrapes
+- Clear separation of concerns
 
-To use both: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
+**Alternative: DaemonSet Overlay** (`last9-otel-collector-metrics-values.yaml`)
+- Adds metrics scraping to existing DaemonSet collector
+- Simpler setup (single collector)
+- ⚠️ May cause duplicate scrapes from each node
+
+To use the overlay approach:
+```bash
+helm upgrade ... --values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml
+```
 
 ### Verification
 
 Check if metrics are being scraped:
 
 ```bash
-# Check collector logs for scraping
-kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep kubernetes-pods
+# Check metrics collector deployment is running
+kubectl get deployment -n last9 last9-otel-collector-metrics
 
-# Port-forward to collector metrics endpoint
-kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
+# Check metrics collector logs for scraping activity
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector-metrics | grep kubernetes-pods
+
+# Port-forward to metrics collector
+kubectl port-forward -n last9 deployment/last9-otel-collector-metrics 8888:8888
 
 # Check scrape status
 curl http://localhost:8888/metrics | grep scrape_samples_scraped
+```
+
+### Uninstall Metrics Collector
+
+```bash
+helm uninstall last9-otel-collector-metrics --namespace last9
 ```

@@ -1,0 +1,226 @@
+# Dedicated Deployment for application metrics scraping
+# Separate from DaemonSet collector to avoid duplicate scrapes
+#
+# Deploy with:
+#   helm upgrade last9-otel-collector-metrics open-telemetry/opentelemetry-collector \
+#     --namespace last9 \
+#     --values last9-otel-collector-metrics-deployment-values.yaml
+
+nameOverride: "last9-otel-collector-metrics"
+fullnameOverride: ""
+
+# Single deployment for metrics scraping (avoids duplicates from DaemonSet)
+mode: "deployment"
+replicaCount: 1
+
+namespaceOverride: "last9"
+
+# Disable presets not needed for metrics-only collector
+presets:
+  logsCollection:
+    enabled: false
+  hostMetrics:
+    enabled: false
+  kubernetesAttributes:
+    enabled: true
+    extractAllPodLabels: true
+    extractAllPodAnnotations: false
+  kubeletMetrics:
+    enabled: false
+  kubernetesEvents:
+    enabled: false
+  clusterMetrics:
+    enabled: false
+
+# RBAC for Kubernetes service discovery
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources:
+        - nodes
+        - nodes/metrics
+        - services
+        - endpoints
+        - pods
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources:
+        - configmaps
+      verbs: ["get"]
+    - nonResourceURLs:
+        - /metrics
+      verbs: ["get"]
+
+config:
+  receivers:
+    # Prometheus receiver for application metrics via annotations
+    prometheus:
+      config:
+        scrape_configs:
+          # Collector's own metrics
+          - job_name: 'otel-metrics-collector'
+            scrape_interval: 30s
+            static_configs:
+              - targets: ['${env:MY_POD_IP}:8888']
+
+          # Application metrics via pod annotations
+          - job_name: 'kubernetes-pods'
+            scrape_interval: 30s
+            scrape_timeout: 10s
+            honor_labels: true
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              # Only scrape pods with prometheus.io/scrape=true
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+
+              # Use custom port from annotation
+              - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^:]+);(\d+)
+                replacement: $1:$2
+                target_label: __address__
+
+              # Use custom path from annotation (default /metrics)
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+
+              # Add Kubernetes metadata as labels
+              - source_labels: [__meta_kubernetes_pod_name]
+                action: replace
+                target_label: pod
+
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+
+              - source_labels: [__meta_kubernetes_pod_node_name]
+                action: replace
+                target_label: node
+
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: replace
+                target_label: app
+
+              - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+                action: replace
+                target_label: app_kubernetes_io_name
+
+          # Application metrics via service annotations
+          - job_name: 'kubernetes-services'
+            scrape_interval: 30s
+            scrape_timeout: 10s
+            honor_labels: true
+            kubernetes_sd_configs:
+              - role: service
+            relabel_configs:
+              # Only scrape services with prometheus.io/scrape=true
+              - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+
+              # Build service DNS address with port
+              - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_namespace, __meta_kubernetes_service_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^;]+);([^;]+);(\d+)
+                replacement: $1.$2.svc.cluster.local:$3
+                target_label: __address__
+
+              # Use custom path from annotation
+              - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+
+              # Add service metadata as labels
+              - source_labels: [__meta_kubernetes_service_name]
+                action: replace
+                target_label: service
+
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+
+  processors:
+    batch:
+      send_batch_size: 10000
+      send_batch_max_size: 10000
+      timeout: 10s
+
+  exporters:
+    prometheusremotewrite/last9:
+      endpoint: "{{LAST9_METRICS_ENDPOINT}}"
+      auth:
+        authenticator: basicauth/last9_metrics
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 300s
+
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+    basicauth/last9_metrics:
+      client_auth:
+        username: "{{LAST9_METRICS_USERNAME}}"
+        password: "{{LAST9_METRICS_PASSWORD}}"
+
+  service:
+    extensions:
+      - health_check
+      - basicauth/last9_metrics
+    pipelines:
+      metrics:
+        receivers:
+          - prometheus
+        processors:
+          - k8sattributes
+          - batch
+        exporters:
+          - prometheusremotewrite/last9
+
+# Disable OTLP ports (handled by DaemonSet collector)
+ports:
+  otlp:
+    enabled: false
+  otlp-http:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+
+# Resource limits for metrics scraping workload
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Image configuration
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  pullPolicy: IfNotPresent
+  tag: "0.126.0"
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
