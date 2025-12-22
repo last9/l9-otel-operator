@@ -306,27 +306,14 @@ This setup scales automatically:
 - **1000 services** → Automatically scraped
 - **No configuration changes needed** when adding new services
 
-### Metrics Configuration Files
+### Metrics Configuration
 
-| File | Mode | Recommended |
-|------|------|-------------|
-| `last9-otel-collector-metrics-deployment-values.yaml` | Separate Deployment | ✅ Yes |
-| `last9-otel-collector-metrics-values.yaml` | DaemonSet overlay | ⚠️ Alternative |
+**File:** `last9-otel-collector-metrics-deployment-values.yaml`
 
-**Recommended: Separate Deployment** (`last9-otel-collector-metrics-deployment-values.yaml`)
-- Runs as a single Deployment alongside the DaemonSet
-- No duplicate metric scrapes
-- Clear separation of concerns
-
-**Alternative: DaemonSet Overlay** (`last9-otel-collector-metrics-values.yaml`)
-- Adds metrics scraping to existing DaemonSet collector
-- Simpler setup (single collector)
-- ⚠️ May cause duplicate scrapes from each node
-
-To use the overlay approach:
-```bash
-helm upgrade ... --values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml
-```
+This runs as a separate Deployment alongside the DaemonSet collector:
+- Single instance avoids duplicate metric scrapes
+- Clear separation: DaemonSet for logs/traces, Deployment for metrics
+- Independent scaling and resource allocation
 
 ### Verification
 

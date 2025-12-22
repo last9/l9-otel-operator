@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:last9.io)",
+      "WebSearch",
+      "WebFetch(domain:opentelemetry.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:artifacthub.io)",
+      "Bash(go mod tidy:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(helm upgrade:*)",
+      "Bash(kubectl wait:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(curl:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
