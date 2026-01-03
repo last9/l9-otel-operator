@@ -263,9 +263,6 @@ config:
         - name: pods
           mode: pull
           interval: 60s
-          # Exclude DELETED to avoid stale topology data
-          exclude_watch_type:
-            - "DELETED"
         # ReplicaSets with ownerReferences to Deployments
         - name: replicasets
           mode: pull
